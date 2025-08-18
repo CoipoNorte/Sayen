@@ -1,11 +1,19 @@
 # funciones.py
 # Utilidades compartidas por p1.py y p2.py
 
+"""
+Módulo de utilidades compartidas para los scripts p1.py y p2.py.
+"""
+
 import os
 import re
 import time
 import unicodedata
 import getpass
+from typing import Dict, List, Tuple
+
+import pandas as pd
+from openpyxl import load_workbook
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -164,11 +172,6 @@ def normalizar_tipo_excel(valor):
 # ==================== Credenciales y login ====================
 
 def get_credentials():
-    """
-    Lee credenciales desde variables de entorno o .env.
-      RAYEN_LOCATION, RAYEN_USERNAME, RAYEN_PASSWORD
-    Si faltan, las pide por consola.
-    """
     location = os.getenv("RAYEN_LOCATION")
     username = os.getenv("RAYEN_USERNAME")
     password = os.getenv("RAYEN_PASSWORD")
@@ -183,9 +186,6 @@ def get_credentials():
     return location, username, password
 
 def iniciar_sesion(driver):
-    """
-    Login estándar con credenciales externas. Mantiene sleep(5) del flujo original.
-    """
     location, username, password = get_credentials()
 
     driver.get(BASE_URL)
@@ -224,11 +224,6 @@ def solicitar_rango_fechas():
 # ==================== Driver compartido (silencioso) ====================
 
 def crear_driver_silencioso(headless: bool | None = None) -> webdriver.Chrome:
-    """
-    Crea un ChromeDriver con logs minimizados.
-    headless por defecto toma HEADLESS=true/1/yes si no se pasa.
-    """
-    # Log de Chrome a null device (Windows: NUL, Linux/Mac: /dev/null)
     os.environ["CHROME_LOG_FILE"] = "NUL" if os.name == "nt" else "/dev/null"
 
     if headless is None:
@@ -250,3 +245,70 @@ def crear_driver_silencioso(headless: bool | None = None) -> webdriver.Chrome:
 
     service = Service(log_output=os.devnull)
     return webdriver.Chrome(options=options, service=service)
+
+# ==================== Escritura en Excel (in place) ====================
+
+def actualizar_excel_inplace(
+    excel_path: str,
+    df: pd.DataFrame,
+    columnas_objetivo: Dict[str, List[str]],
+    only_if_empty: bool = True
+) -> Dict[str, int]:
+    """
+    Actualiza el Excel 'excel_path' escribiendo SOLO celdas vacías para las columnas objetivo.
+    Si una columna no existe en el Excel, la crea al final con el encabezado canónico.
+
+    Args:
+      excel_path (str): Ruta del Excel a actualizar.
+      df (pd.DataFrame): DataFrame con las columnas a escribir (mismos renglones que el Excel).
+      columnas_objetivo (dict): {'CANONICO': ['alias1','alias2',...], ...}
+      only_if_empty (bool): Si True, solo escribe cuando la celda está vacía (None/"").
+
+    Returns:
+      dict[str,int]: Cantidad de celdas escritas por columna canónica.
+    """
+    wb = load_workbook(excel_path)
+    ws = wb.active
+
+    # Mapear encabezados del Excel (fila 1) -> índice de columna
+    header_map = {}
+    for col in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=col).value
+        key = str(val).strip().upper() if val is not None else ""
+        if key:
+            header_map[key] = col
+
+    escritos_por_col = {}
+
+    # Asegurar que todas las columnas canónicas existan (o crearlas)
+    for canonico, aliases in columnas_objetivo.items():
+        col_idx = None
+        # Buscar por alias
+        for alias in aliases + [canonico]:
+            alias_up = alias.strip().upper()
+            if alias_up in header_map:
+                col_idx = header_map[alias_up]
+                break
+        # Si no existe, crear nueva al final
+        if col_idx is None:
+            col_idx = ws.max_column + 1
+            ws.cell(row=1, column=col_idx, value=canonico)
+            header_map[canonico.upper()] = col_idx
+
+        escritos = 0
+        # Escribir valores fila a fila (DataFrame debe alinear con el Excel: fila 2 -> df.iloc[0])
+        for i in range(2, ws.max_row + 1):
+            df_idx = i - 2
+            if df_idx >= len(df):
+                break
+            nuevo_valor = df.at[df.index[df_idx], canonico] if canonico in df.columns else None
+            # Si DataFrame tiene el valor y no está vacío
+            if not is_empty(nuevo_valor):
+                celda = ws.cell(row=i, column=col_idx)
+                if (not only_if_empty) or (celda.value in (None, "")):
+                    celda.value = nuevo_valor
+                    escritos += 1
+        escritos_por_col[canonico] = escritos
+
+    wb.save(excel_path)
+    return escritos_por_col

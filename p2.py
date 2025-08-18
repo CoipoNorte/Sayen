@@ -9,6 +9,7 @@ import re
 import time
 import datetime
 import sys
+import os
 
 try:
     import msvcrt
@@ -21,7 +22,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-# Importa utilidades compartidas
 from funciones import (
     iniciar_sesion,
     esperar_loader_y_modal,
@@ -32,6 +32,7 @@ from funciones import (
     detect_tipo_y_deficit,
     normalizar_tipo_excel,
     crear_driver_silencioso,
+    actualizar_excel_inplace,
 )
 
 def color_text(text, color="cyan"):
@@ -78,8 +79,6 @@ def pause_or_timeout(seconds=7):
             time.sleep(1)
         print("\r" + " " * 80, end="\r")
         print(color_text("Continuando...", "cyan"))
-
-# ==================== Anamnesis helpers ====================
 
 def abrir_fecha_y_anamnesis(driver, wait, fecha_dt):
     try:
@@ -165,21 +164,22 @@ for c in ["SEXO", "CONSEJERIA", "TIPO DE ATENCIÓN", "TIPO DE ATENCION", "DÉFIC
     if c in df.columns:
         df[c] = df[c].astype("object")
 
-# Columnas requeridas
+# Columnas que p2 puede completar (crear si no existen en df)
 if "SEXO" not in df.columns:
     df["SEXO"] = None
 if "CONSEJERIA" not in df.columns:
     df["CONSEJERIA"] = ""
-tipo_col = "TIPO DE ATENCIÓN"
-if tipo_col not in df.columns and "TIPO DE ATENCION" in df.columns:
-    df[tipo_col] = df["TIPO DE ATENCION"]
-elif tipo_col not in df.columns:
-    df[tipo_col] = ""
-deficit_col = "DÉFICIT"
-if deficit_col not in df.columns and "DEFICIT" in df.columns:
-    df[deficit_col] = df["DEFICIT"]
-elif deficit_col not in df.columns:
-    df[deficit_col] = ""
+# Mantén ambas variantes de TIPO/DÉFICIT en df para escritura canónica
+if "TIPO DE ATENCIÓN" not in df.columns:
+    if "TIPO DE ATENCION" in df.columns:
+        df["TIPO DE ATENCIÓN"] = df["TIPO DE ATENCION"]
+    else:
+        df["TIPO DE ATENCIÓN"] = ""
+if "DÉFICIT" not in df.columns:
+    if "DEFICIT" in df.columns:
+        df["DÉFICIT"] = df["DEFICIT"]
+    else:
+        df["DÉFICIT"] = ""
 
 # RUN/RUT
 if "RUN" in df.columns:
@@ -201,8 +201,8 @@ iniciar_sesion(driver)
 
 # Navegar: Box > Agregar documentos
 esperar_loader_y_modal(driver, wait)
-from selenium.webdriver.common.by import By  # ya está importado arriba, pero por claridad del bloque
-from selenium.webdriver.support import expected_conditions as EC  # ya arriba
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
 wait.until(EC.element_to_be_clickable((By.ID, "navbar-main-menu"))).click()
 time.sleep(1)
 esperar_loader_y_modal(driver, wait)
@@ -223,7 +223,7 @@ for idx, row in df.iterrows():
     if not run:
         continue
 
-    # FECHA de la fila (solo para navegar árbol; si falta, se omite Anamnesis)
+    # FECHA (para árbol/Anamnesis; si falta, se omite análisis de Anamnesis)
     if isinstance(fecha_val, (pd.Timestamp, datetime.datetime)):
         fecha_dt = fecha_val
     else:
@@ -232,18 +232,18 @@ for idx, row in df.iterrows():
         except:
             fecha_dt = None
 
-    # Normaliza TIPO si viene en Excel (no dejar 'nan')
-    tipo_excel = row.get(tipo_col, "")
+    # Normaliza TIPO si viene en Excel, pero NO sobreescribe si ya existe (relleno solo si vacío)
+    tipo_excel = row.get("TIPO DE ATENCIÓN", "")
     tipo_norm = normalizar_tipo_excel(tipo_excel)
-    if tipo_norm:
-        df.at[idx, tipo_col] = tipo_norm
+    if tipo_norm and is_empty(df.at[idx, "TIPO DE ATENCIÓN"]):
+        df.at[idx, "TIPO DE ATENCIÓN"] = tipo_norm
 
     print(color_text(f"\n--- Buscando paciente ---", "yellow"))
     print(color_text(f"RUN: {run}", "cyan"))
     print(color_text(f"NOMBRE: {nombre}", "green"))
     print(color_text(f"FECHA: {(fecha_dt.strftime('%d-%m-%Y') if fecha_dt else 'sin fecha')}", "yellow"))
-    if not is_empty(df.at[idx, tipo_col]):
-        print(color_text(f"TIPO (normalizado): {df.at[idx, tipo_col]}", "cyan"))
+    if not is_empty(df.at[idx, "TIPO DE ATENCIÓN"]):
+        print(color_text(f"TIPO (normalizado): {df.at[idx, 'TIPO DE ATENCIÓN']}", "cyan"))
 
     # Buscar RUN
     esperar_loader_y_modal(driver, wait)
@@ -273,7 +273,7 @@ for idx, row in df.iterrows():
     try:
         tablas = driver.find_elements(By.XPATH, "//table")
         edad_str = ""
-        sexo_val = df.at[idx, "SEXO"]
+        sexo_val_actual = df.at[idx, "SEXO"]
 
         for tabla in tablas:
             for fila in tabla.find_elements(By.TAG_NAME, "tr"):
@@ -288,30 +288,32 @@ for idx, row in df.iterrows():
                 if not edad_str and "edad" in header_norm:
                     edad_str = value
 
-                if is_empty(sexo_val) and ("sexo" in header_norm and "biologico" in header_norm):
+                if is_empty(sexo_val_actual) and ("sexo" in header_norm and "biologico" in header_norm):
                     vr = normalize(value)
                     if "HOMBRE" in vr or "MASCULIN" in vr:
-                        sexo_val = "MASCULINO"
+                        sexo_val_actual = "MASCULINO"
                     elif "MUJER" in vr or "FEMENIN" in vr:
-                        sexo_val = "FEMENINO"
+                        sexo_val_actual = "FEMENINO"
 
-        if edad_str and edad_menor_4_meses(edad_str):
+        # CONSEJERÍA = LME solo si está vacío y corresponde
+        if edad_str and edad_menor_4_meses(edad_str) and is_empty(df.at[idx, "CONSEJERIA"]):
             df.at[idx, "CONSEJERIA"] = "LME"
             print(color_text(f"[{idx}] {run} → CONSEJERÍA: LME (edad: {edad_str})", "green"))
         else:
             print(color_text(f"[{idx}] {run} → Edad: {edad_str}", "cyan"))
 
-        if not is_empty(sexo_val):
-            df.at[idx, "SEXO"] = sexo_val
-            print(color_text(f"[{idx}] {run} → SEXO: {sexo_val}", "green"))
-        else:
+        # SEXO: solo si estaba vacío
+        if not is_empty(sexo_val_actual) and is_empty(df.at[idx, "SEXO"]):
+            df.at[idx, "SEXO"] = sexo_val_actual
+            print(color_text(f"[{idx}] {run} → SEXO: {sexo_val_actual}", "green"))
+        elif is_empty(sexo_val_actual):
             print(color_text(f"[{idx}] {run} → SEXO no encontrado", "yellow"))
 
     except:
         print(color_text(f"[{idx}] {run} → No se pudo leer ficha general (edad/sexo).", "yellow"))
 
     # Si TIPO = NSP → omite Anamnesis y Déficit
-    tipo_final_pre = df.at[idx, tipo_col] if not is_empty(df.at[idx, tipo_col]) else ""
+    tipo_final_pre = df.at[idx, "TIPO DE ATENCIÓN"] if not is_empty(df.at[idx, "TIPO DE ATENCIÓN"]) else ""
     if normalize(tipo_final_pre) == "NSP":
         print(color_text(f"[{idx}] {run} → TIPO = NSP. Se omite Anamnesis y DÉFICIT.", "yellow"))
         pause_or_timeout(7)
@@ -343,40 +345,44 @@ for idx, row in df.iterrows():
         pause_or_timeout(7)
         continue
 
-    # Analiza Anamnesis
+    # Analiza Anamnesis → TIPO/DÉFICIT (solo si estaban vacíos)
     tipo_detect, deficit_detect = detect_tipo_y_deficit(texto_anam)
 
-    if tipo_detect:
-        df.at[idx, tipo_col] = tipo_detect
+    if tipo_detect and is_empty(df.at[idx, "TIPO DE ATENCIÓN"]):
+        df.at[idx, "TIPO DE ATENCIÓN"] = tipo_detect
         print(color_text(f"[{idx}] {run} → TIPO (Anamnesis): {tipo_detect}", "green"))
 
     if tipo_detect and normalize(tipo_detect) == "NSP":
         print(color_text(f"[{idx}] {run} → TIPO = NSP detectado en Anamnesis. Se omite DÉFICIT.", "yellow"))
     else:
-        if deficit_detect:
-            df.at[idx, deficit_col] = deficit_detect
+        if deficit_detect and is_empty(df.at[idx, "DÉFICIT"]):
+            df.at[idx, "DÉFICIT"] = deficit_detect
             print(color_text(f"[{idx}] {run} → DÉFICIT (Anamnesis): {deficit_detect}", "green"))
         else:
-            print(color_text(f"[{idx}] {run} → DÉFICIT no detectado en Anamnesis", "yellow"))
+            print(color_text(f"[{idx}] {run} → DÉFICIT no detectado o ya estaba informado", "yellow"))
 
     pause_or_timeout(7)
 
-# ==================== Salida ====================
+# ==================== Escritura IN PLACE ====================
 
-def fecha_a_texto(x):
-    if pd.isnull(x):
-        return ""
-    if isinstance(x, (pd.Timestamp, datetime.datetime)):
-        return x.strftime("%d-%m-%Y")
-    return str(x)
+# Mapeo de columnas (canónicas -> alias aceptados en el Excel)
+columnas_objetivo = {
+    "SEXO": ["SEXO"],
+    "CONSEJERIA": ["CONSEJERIA"],
+    "TIPO DE ATENCIÓN": ["TIPO DE ATENCIÓN", "TIPO DE ATENCION"],
+    "DÉFICIT": ["DÉFICIT", "DEFICIT"],
+}
 
-if "FECHA" in df.columns:
-    df["FECHA"] = df["FECHA"].apply(fecha_a_texto)
-
-out_path = excel_path.replace(".xlsx", "_actualizado.xlsx")
-df.to_excel(out_path, index=False)
-print(color_text("\n¡Proceso terminado! Archivo guardado en: " + out_path, "green"))
+try:
+    stats = actualizar_excel_inplace(excel_path, df, columnas_objetivo, only_if_empty=True)
+    print(color_text("\nActualización IN PLACE completada:", "green"))
+    for k, v in stats.items():
+        print(color_text(f"- {k}: {v} celdas escritas", "cyan"))
+    print(color_text(f"Archivo actualizado: {excel_path}", "green"))
+except PermissionError:
+    print(color_text("\nNo se pudo guardar el Excel. ¿Está abierto? Ciérralo e inténtalo de nuevo.", "red"))
+except Exception as e:
+    print(color_text(f"\nError al actualizar el Excel: {e}", "red"))
 
 # Cierra navegador
-from selenium import webdriver  # no necesario, pero por claridad del bloque
 driver.quit()
