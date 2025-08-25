@@ -1,19 +1,57 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-dist/
-build/
-
-# venv
-.venv/
+*$py.class
+*.so
+.Python
+env/
 venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# VS Code
-.vscode/
-
-# Credenciales y logs
+# Configuración local
 .env
-*.log
+.env.local
+config.ini
+
+# Datos sensibles
+data/input/*.xlsx
+data/output/*.xlsx
+data/temp/*
 *.xlsx
-__pycache__
+*.xls
+*.csv
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Selenium
+geckodriver.log
+chromedriver.log
